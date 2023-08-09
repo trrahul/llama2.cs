@@ -19,7 +19,8 @@ dotnet build -c Release
 ```
 .\bin\Release\net7.0\llama2.cs.exe stories15M.bin
 ```
-![WindowsTerminal_LrRTW3joph](https://github.com/trrahul/llama2.cs/assets/7353840/64ffc379-37a0-474c-ad99-aed0c42de78a)
+![WindowsTerminal_LrRTW3joph](https://github.com/trrahul/llama2.cs/assets/7353840/3b469a99-b83a-43f1-b07d-227da7b9ebe0)
+
 
 ### Generate a random story with a given prompt
 ```
