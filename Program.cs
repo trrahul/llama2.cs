@@ -587,7 +587,7 @@ public static class Program
     {
         float[] array = new float[size];
         accessor.ReadArray(offset, array, 0, size);
-        offset += sizeof(float) * size;
+        offset += sizeof(float) * (long) size;
         return array;
     }
 
