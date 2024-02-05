@@ -1,6 +1,7 @@
 ﻿using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO.MemoryMappedFiles;
+using System.Numerics.Tensors;
 using System.Runtime.InteropServices;
 using System.Text;
 #pragma warning disable CA2014
@@ -150,7 +151,6 @@ public static class Program
             }
         }
 
-
         // create and init the application RunState
         RunState state = InitializeRunState(config);
 
@@ -163,7 +163,6 @@ public static class Program
             BpeEncode(prompt, vocab, vocabScores, config.vocab_size, maxTokenLength, ref promptTokens,
                 ref numPromptTokens);
         }
-
 
         // start the main loop
         int token = 1; // init with token 1 (=BOS), as done in Llama-2 sentencepiece tokenizer
@@ -195,8 +194,10 @@ public static class Program
                 {
                     // apply the temperature to the logits
                     for (int q = 0; q < config.vocab_size; q++) state.logits[q] /= temperature;
+
                     // apply softmax to the logits to get the probabilities for next token
-                    Softmax(state.logits, 0, config.vocab_size);
+                    Softmax(state.logits.AsSpan(0, config.vocab_size));
+                    
                     // we sample from this distribution to get the next token
                     if (topp <= 0)
                         // simply sample from the predicted probability distribution
@@ -218,7 +219,7 @@ public static class Program
             token = next;
         }
 
-        timer.Start();
+        timer.Stop();
         Console.WriteLine();
 
         // report achieved tok/s (pos-1 because the timer starts after first iteration)
@@ -226,7 +227,6 @@ public static class Program
             Console.WriteLine(
                 $"achieved tok/s: {(pos - 1) / timer.Elapsed.Seconds}, tokens : {pos - 1} time : {timer.Elapsed}");
     }
-
 
     private static void BpeEncode(string text, string[] vocab, float[] vocabScores, int vocabSize, int maxTokenLength,
         ref int[] tokens, ref int nTokens)
@@ -287,8 +287,10 @@ public static class Program
 
             // merge the consecutive pair (bestIdx, bestIdx+1) into new token bestId
             tokens[bestIdx] = bestId;
+            
             // delete token at position bestIdx+1, shift the entire sequence back 1
             for (int i = bestIdx + 1; i < nTokens - 1; i++) tokens[i] = tokens[i + 1];
+
             nTokens--; // token length decreased
         }
     }
@@ -389,11 +391,11 @@ public static class Program
         for (int i = 0; i < size; i++) a[i] += b[i];
     }
 
-    private static void Rmsnorm(float[] o, float[] x, ArraySegment<float> weight, int size)
+    private static void Rmsnorm(float[] o, float[] x, Span<float> weight, int size)
     {
         // calculate sum of squares
-        float ss = 0.0f;
-        for (int j = 0; j < size; j++) ss += x[j] * x[j];
+        float ss = TensorPrimitives.SumOfSquares(x.AsSpan(0, size));
+        
         ss /= size;
         ss += 1e-5f;
         ss = 1.0f / MathF.Sqrt(ss);
@@ -402,23 +404,21 @@ public static class Program
         for (int j = 0; j < size; j++) o[j] = weight[j] * (ss * x[j]);
     }
 
-    private static void Softmax(float[] x, int xOffset, int size)
+    private static void Softmax(Span<float> x)
     {
         // find max value (for numerical stability)
-        float maxVal = x[0 + xOffset];
-        for (int i = 1; i < size; i++)
-            if (x[i + xOffset] > maxVal)
-                maxVal = x[i + xOffset];
+        float maxVal = TensorPrimitives.Max(x);
+        
         // exp and sum
         float sum = 0.0f;
-        for (int i = 0; i < size; i++)
+        for (int i = 0; i < x.Length; i++)
         {
-            x[i + xOffset] = (float) Math.Exp(x[i + xOffset] - maxVal);
-            sum += x[i + xOffset];
+            x[i] = MathF.Exp(x[i] - maxVal);
+            sum += x[i];
         }
 
         // normalize
-        for (int i = 0; i < size; i++) x[i + xOffset] /= sum;
+        TensorPrimitives.Divide(x, sum, x);
     }
 
     private static void Matmul(float[] xout, float[] x, ArraySegment<float> w, int n, int d)
@@ -426,9 +426,7 @@ public static class Program
         // W (d,n) @ x (n,) . xout (d,)
         Parallel.For(0, d, i =>
         {
-            float val = 0.0f;
-            for (int j = 0; j < n; j++) val += w[i * n + j] * x[j];
-            xout[i] = val;
+            xout[i] = TensorPrimitives.Dot(w.AsSpan(i * n, n), x);
         });
     }
 
@@ -442,7 +440,6 @@ public static class Program
 
         // copy the token embedding into x
         Array.Copy(w.token_embedding_table, token * dim, state.x, 0, dim);
-
 
         // forward all the layers
         for (int l = 0; l < config.n_layers; l++)
@@ -482,7 +479,7 @@ public static class Program
                 int qOffset = h * headSize;
 
                 // attention scores for this head
-                int attOffset = h * config.seq_len;
+                Span<float> att = state.att.AsSpan(h * config.seq_len);
 
                 // iterate over all timesteps, including the current one
                 for (int t = 0; t <= pos; t++)
@@ -492,18 +489,16 @@ public static class Program
 
                     // calculate the attention score as the dot product of q and k
                     float score = 0.0f;
-                    for (int i = 0; i < headSize; i++)
-                        score += state.q[i + qOffset] * state.key_cache[i + keyCacheOffset];
+                    for (int i = 0; i < headSize; i++) score += state.q[i + qOffset] * state.key_cache[i + keyCacheOffset];
 
-                    score /= (float) Math.Sqrt(headSize);
+                    score /= MathF.Sqrt(headSize);
 
                     // save the score to the attention buffer
-                    state.att[t + attOffset] = score;
+                    att[t] = score;
                 }
 
-
                 // softmax the scores to get attention weights, from 0..pos inclusively
-                Softmax(state.att, attOffset, pos + 1);
+                Softmax(att[..(pos + 1)]);
 
                 // weighted sum of the values, store back into xb
                 int xbOffset = h * headSize;
@@ -515,15 +510,13 @@ public static class Program
                     int vOffset = loff + t * dim + h * headSize;
 
                     // get the attention weight for this timestep
-                    float a = state.att[t + attOffset];
+                    float a = att[t];
 
                     // accumulate the weighted value into xb
                     for (int i = 0; i < headSize; i++)
                         state.xb[i + xbOffset] += a * state.value_cache[i + vOffset];
                 }
             });
-
-            ;
 
             // final matmul to get the output of the attention
             Matmul(state.xb2, state.xb, w.wo[(l * dim * dim)..], dim, dim);
@@ -541,10 +534,10 @@ public static class Program
 
             // F.silu; silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
             for (int i = 0; i < hiddenDim; i++)
-                state.hb[i] *= (1.0f / (1.0f + (float) Math.Exp(-state.hb[i])));
+                state.hb[i] *= 1.0f / (1.0f + MathF.Exp(-state.hb[i]));
 
             // elementwise multiply with w3(x)
-            for (int i = 0; i < hiddenDim; i++) state.hb[i] *= state.hb2[i];
+            TensorPrimitives.Multiply(state.hb.AsSpan(0, hiddenDim), state.hb2.AsSpan(0, hiddenDim), state.hb.AsSpan(0, hiddenDim));
 
             // final matmul to get the output of the ffn
             Matmul(state.xb, state.hb, w.w2[(l * dim * hiddenDim)..], hiddenDim, dim);
