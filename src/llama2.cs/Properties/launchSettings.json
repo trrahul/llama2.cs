@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "llama2.cs": {
+      "commandName": "Project",
+      "commandLineArgs": "stories15M.bin"
+    }
+  }
+}

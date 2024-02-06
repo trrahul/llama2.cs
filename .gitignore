@@ -1,7 +1,6 @@
-﻿################################################################################
-# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
-################################################################################
+.vs
+.orig
+bin
+obj
+_tests
 
-/.vs/llama2.cs
-/bin/Release/net7.0
-/obj
